@@ -3,7 +3,7 @@
 set -euo pipefail
 
 UPSTREAM_REPO="https://github.com/MiSTer-devel/Arcade-NinjaKun_MiSTer.git"
-CORE_NAME="Arcade_NinjaKun"
+CORE_NAME="Arcade-NinjaKun"
 MAIN_BRANCH="master"
 
 echo "Fetching upstream:"
