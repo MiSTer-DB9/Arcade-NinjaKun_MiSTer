@@ -194,6 +194,14 @@ assign VIDEO_ARX =  (!ar) ? ( 8'd4) : (ar - 1'd1);
 assign VIDEO_ARY =  (!ar) ? ( 8'd3) : 12'd0;
 
 `include "build_id.v" 
+`include "rtl/defs.v"
+
+// Status Bit Map:
+//             Upper                             Lower              
+// 0         1         2         3          4         5         6   
+// 01234567890123456789012345678901 23456789012345678901234567890123
+// 0123456789ABCDEFGHIJKLMNOPQRSTUV 0123456789ABCDEFGHIJKLMNOPQRSTUV
+//    XXXX            XX    XXX   
 localparam CONF_STR = {
 	"A.NinjaKun;;",
 	"H0OJK,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
@@ -201,6 +209,8 @@ localparam CONF_STR = {
 	"OUV,UserIO Joystick,Off,DB9MD,DB15 ;",
 	"OT,UserIO Players, 1 Player,2 Players;",
 "-;",
+	"O6,Service Mode,Off,On;",
+	"-;",
 	"DIP;",
 	"-;",
 	"H1OR,Autosave Hiscores,Off,On;",
@@ -216,9 +226,16 @@ localparam CONF_STR = {
 };
 
 // Read DIPs from MRA
-reg [7:0] m_dip[8];	// Active-LOW
-always @(posedge clk_sys) if(ioctl_wr && (ioctl_index==254) && !ioctl_addr[24:3]) m_dip[ioctl_addr[2:0]] <= ioctl_dout;
+
+reg [7:0] m_dip[8];
+always @(posedge clk_sys) begin
+	if (ioctl_wr) begin
+		if ((ioctl_index==254) && !ioctl_addr[24:3]) m_dip[ioctl_addr[2:0]] <= ioctl_dout;
+	end
+end
 wire bCabinet  = m_dip[0][0]; 	// (upright only)
+
+wire service = status[6];
 
 ////////////////////   CLOCKS   ///////////////////
 
@@ -236,7 +253,7 @@ pll pll
 
 ///////////////////////////////////////////////////
 
-wire [31:0] status;
+wire [63:0] status;
 wire  [1:0] buttons;
 wire        forced_scandoubler;
 wire        direct_video;
@@ -395,8 +412,27 @@ assign AUDIO_S = 1'b0; // unsigned
 wire  [7:0] iDSW1 =  m_dip[0];
 wire  [7:0] iDSW2 =  m_dip[1];
 
-wire  [7:0] iCTR1 = ~{     2'b11,    m_start1, 1'b0, m_trig11, m_trig12, m_right1, m_left1 };
-wire  [7:0] iCTR2 = ~{ ~m_coin,1'b1, m_start2, 1'b0, m_trig21, m_trig22, m_right2, m_left2 };
+wire [7:0]  iCTR1,iCTR2,iCTR3;
+
+reg [7:0] hwtype = 255;
+always @(posedge clk_sys) if (ioctl_wr & (ioctl_index==1)) hwtype <= ioctl_dout;
+
+always @(*) begin
+	iCTR1 = ~{2'b11, m_start1, 1'b0, m_trig11, m_trig12, m_right1, m_left1  };
+	iCTR2 = ~{~(m_coin1 | m_coin2), ~service, m_start2, 1'b0, m_trig21, m_trig22, m_right2, m_left2 };
+	iCTR3 = 0;
+	if (hwtype == `HW_RAIDERS5) begin
+		iCTR1 = ~{1'b0, 1'b0, m_start1, m_trig11, m_up1, m_down1, m_right1, m_left1};
+		iCTR2 = ~{(m_coin1 | m_coin2), service, m_start2, m_trig21, m_up2, m_down2, m_right2, m_left2};
+	end else if (hwtype == `HW_NOVA2001) begin
+		iCTR1 = ~{m_trig11, m_trig12, 2'b00, m_right1, m_left1 , m_down1, m_up1};
+		iCTR2 = ~{m_trig21, m_trig22, 2'b00, m_right2, m_left2, m_down2, m_up2};
+		iCTR3 = ~{5'b00000, m_start2, m_start1, m_coin1 | m_coin2};
+	end else if (hwtype == `HW_PKUNWAR) begin
+		iCTR1 = ~{2'b00, m_start1, 2'b00, m_trig11, m_right1, m_left1  };
+		iCTR2 = ~{(m_coin1 | m_coin2), service, m_start2, 2'b00, m_trig21, m_right2, m_left2 };
+	end
+end
 
 wire			rom_download = ioctl_download & ioctl_index == 1'b0;
 wire			iRST  = RESET | status[0] | buttons[1] | rom_download;
@@ -404,13 +440,26 @@ wire			iRST  = RESET | status[0] | buttons[1] | rom_download;
 wire  [7:0] oPIX;
 assign		POUT = {{oPIX[7:6],oPIX[1:0]},{oPIX[5:4],oPIX[1:0]},{oPIX[3:2],oPIX[1:0]}};
 
+reg [4:0] PALADR;
+reg PALWR;
+reg [24:0] PALDAT;
+always @(posedge clk_sys) begin
+	if (ioctl_wr) begin
+		PALWR <= ioctl_addr[23:5] == {16'h0180, 3'b000};
+	end
+	PALDAT <= ioctl_dout;
+	PALADR <= ioctl_addr[4:0];
+end
 
 FPGA_NINJAKUN GameCore
 (
 	.RESET(iRST),.MCLK(clk_48M),
 
-	.CTR1(iCTR1),.CTR2(iCTR2),
-	.DSW1(iDSW1),.DSW2(iDSW2),
+	.CTR1(iCTR1),.CTR2(iCTR2),.CTR3(iCTR3),
+	.DSW1(iDSW1),
+	.DSW2({(hwtype == `HW_NOVA2001 ? ~service : iDSW2[7]), iDSW2[6:0]}),
+	
+	.HWTYPE(hwtype),
 
 	.PH(HPOS),.PV(VPOS),
 	.PCLK(PCLK),.POUT(oPIX),
@@ -422,11 +471,16 @@ FPGA_NINJAKUN GameCore
 
 	.pause(pause_cpu),
 
+	.PALADR(PALADR),
+	.PALWR(PALWR),
+	.PALDAT(PALDAT),
+
 	.hs_address(hs_address),
 	.hs_data_out(hs_data_out),
 	.hs_data_in(hs_data_in),
 	.hs_write(hs_write_enable),
 	.hs_access(hs_access_read|hs_access_write)
+
 );
 
 // HISCORE SYSTEM
